@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 import os
 import re
 from datetime import datetime
@@ -142,6 +143,7 @@ class AnalysisOutput(BaseModel):
 
 class WriterInput(BaseModel):
     analysis: AnalysisOutput
+    research: ResearchOutput
 
 
 class WriterOutput(BaseModel):
@@ -476,7 +478,7 @@ Task:
 3) If research.status='ok', analyze only research.content and produce:
    - title_th
    - summary_points (exactly 5 items, Thai)
-   - translated_body_th (Thai, readable, factual)
+   - translated_body_th (Thai full-article translation, preserve all key paragraphs and details)
    - key_entities, key_numbers, risk_notes
 4) Return JSON matching AnalysisOutput exactly.
 
@@ -491,11 +493,11 @@ You are Writer Agent.
 Input is JSON matching WriterInput.
 Task:
 1) Call update_workflow_stage with stage='Approved'.
-2) If analysis.status='error', return status='error'.
+2) If analysis.status='error' or research.status='error', return status='error'.
 3) Build final_markdown_th using this order:
    - headline in Thai
    - 5 bullet summary in Thai
-   - full Thai translation
+   - full Thai translation from analysis.translated_body_th
    - source URL
 4) Build narration_text_th for TTS from the same content, concise and <= 1200 chars.
 5) Return JSON matching WriterOutput exactly.
@@ -529,7 +531,7 @@ Behavior:
 1) If user provides a news URL:
    - call research_agent with {"url": "..."}
    - if ok, call analyzer_agent with {"research": research_result}
-   - if ok, call writer_agent with {"analysis": analysis_result}
+   - if ok, call writer_agent with {"analysis": analysis_result, "research": research_result}
    - if ok, call narrator_agent with {"writer": writer_result}
    - then call update_workflow_stage with stage='Published'
    - respond in Thai with narrator_result.final_markdown_th
@@ -575,6 +577,180 @@ def _build_text_response(message: str) -> LlmResponse:
         ),
         turn_complete=True,
     )
+
+
+def _coerce_mapping(value: object) -> dict:
+    if isinstance(value, dict):
+        return value
+    if value is None:
+        return {}
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            return {}
+    if hasattr(value, "dict"):
+        try:
+            dumped = value.dict()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            return {}
+    if isinstance(value, str):
+        try:
+            dumped = json.loads(value)
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            return {}
+    return {}
+
+
+def _iter_state_items(callback_context: CallbackContext):
+    try:
+        keys = list(callback_context.state.keys())
+    except Exception:
+        return
+    for key in keys:
+        try:
+            value = callback_context.state.get(key)
+        except Exception:
+            continue
+        yield str(key), value
+
+
+def _find_article_mapping(value: object, depth: int = 0) -> dict:
+    if depth > 5:
+        return {}
+    data = _coerce_mapping(value)
+    if data:
+        content = (data.get("content") or "").strip()
+        if content:
+            return data
+        for nested in data.values():
+            found = _find_article_mapping(nested, depth + 1)
+            if found:
+                return found
+        return {}
+    if isinstance(value, list):
+        for item in value:
+            found = _find_article_mapping(item, depth + 1)
+            if found:
+                return found
+    return {}
+
+
+def _find_analysis_mapping(value: object, depth: int = 0) -> dict:
+    if depth > 5:
+        return {}
+    data = _coerce_mapping(value)
+    if data:
+        body = (data.get("translated_body_th") or "").strip()
+        if body:
+            return data
+        for nested in data.values():
+            found = _find_analysis_mapping(nested, depth + 1)
+            if found:
+                return found
+        return {}
+    if isinstance(value, list):
+        for item in value:
+            found = _find_analysis_mapping(item, depth + 1)
+            if found:
+                return found
+    return {}
+
+
+def _read_research_output(callback_context: CallbackContext) -> dict:
+    preferred_keys = [
+        "research_output",
+        "research",
+        "research_result",
+        "research_agent_output",
+        "research_agent.research_output",
+    ]
+    for key in preferred_keys:
+        try:
+            raw = callback_context.state.get(key, {})
+        except Exception:
+            raw = {}
+        found = _find_article_mapping(raw)
+        if found:
+            return found
+
+    for _, raw in _iter_state_items(callback_context):
+        found = _find_article_mapping(raw)
+        if found:
+            return found
+    return {}
+
+
+def _read_analysis_output(callback_context: CallbackContext) -> dict:
+    preferred_keys = [
+        "analysis_output",
+        "analysis",
+        "analysis_result",
+        "analyzer_agent_output",
+        "analyzer_agent.analysis_output",
+    ]
+    for key in preferred_keys:
+        try:
+            raw = callback_context.state.get(key, {})
+        except Exception:
+            raw = {}
+        found = _find_analysis_mapping(raw)
+        if found:
+            return found
+
+    for _, raw in _iter_state_items(callback_context):
+        found = _find_analysis_mapping(raw)
+        if found:
+            return found
+    return {}
+
+
+def _append_full_article_if_needed(
+    callback_context: CallbackContext, current_text: str
+) -> str:
+    try:
+        stage = str(callback_context.state.get("workflow_stage", "")).strip()
+    except Exception:
+        stage = ""
+    if stage and stage not in {"Published", "Audio Ready"}:
+        return current_text
+
+    analysis = _read_analysis_output(callback_context)
+    thai_body = (analysis.get("translated_body_th") or "").strip()
+    if not thai_body:
+        return current_text
+
+    if thai_body[:160] and thai_body[:160] in current_text:
+        return current_text
+
+    research = _read_research_output(callback_context)
+    source_url = (
+        research.get("source_url")
+        or research.get("original_url")
+        or ""
+    ).strip()
+    title = (research.get("title") or "").strip()
+    published = (research.get("published_time") or "").strip()
+
+    meta_lines: list[str] = []
+    if title:
+        meta_lines.append(f"ชื่อข่าว: {title}")
+    if source_url:
+        meta_lines.append(f"ที่มา: {source_url}")
+    if published:
+        meta_lines.append(f"เวลาเผยแพร่: {published}")
+
+    appendix = "## เนื้อหาข่าวฉบับเต็ม (ภาษาไทย)\n"
+    if meta_lines:
+        appendix += "\n".join(meta_lines) + "\n\n"
+    appendix += thai_body
+    return f"{current_text.rstrip()}\n\n---\n\n{appendix}"
 
 
 def _is_truthy(value: str | None) -> bool:
@@ -847,9 +1023,10 @@ def _root_before_model_callback(
     return _build_text_response(
         "Capabilities:\n"
         "1) Read news from URL\n"
-        "2) Summarize and translate to Thai\n"
-        "3) Create MP3 audio in Artifacts\n"
-        "4) Use Search/Web/Notion MCP when enabled\n\n"
+        "2) Summarize + include full Thai article body\n"
+        "3) Translate to Thai\n"
+        "4) Create MP3 audio in Artifacts\n"
+        "5) Use Search/Web/Notion MCP when enabled\n\n"
         "Please send a news URL, e.g. https://example.com/news/..."
     )
 
@@ -858,8 +1035,7 @@ def _root_after_model_callback(
     callback_context: CallbackContext,
     llm_response: LlmResponse,
 ) -> LlmResponse | None:
-    """Guarantee visible fallback text when model returns an empty reply."""
-    _ = callback_context
+    """Guarantee visible text and append full article body after pipeline output."""
     if llm_response.error_code:
         return None
     if llm_response.partial:
@@ -867,12 +1043,24 @@ def _root_after_model_callback(
 
     content = llm_response.content
     if content and content.parts:
-        has_text = any((part.text or "").strip() for part in content.parts)
+        text_parts = [
+            (part.text or "").strip() for part in content.parts
+            if (part.text or "").strip()
+        ]
+        has_text = bool(text_parts)
         has_function_event = any(
             part.function_call or part.function_response
             for part in content.parts
         )
-        if has_text or has_function_event:
+        if has_text:
+            joined = "\n\n".join(text_parts)
+            enriched = _append_full_article_if_needed(
+                callback_context, joined
+            )
+            if enriched != joined:
+                return _build_text_response(enriched)
+            return None
+        if has_function_event:
             return None
 
     return _build_text_response(
@@ -902,7 +1090,10 @@ analyzer_agent = Agent(
     input_schema=AnalysisInput,
     output_schema=AnalysisOutput,
     output_key="analysis_output",
-    generate_content_config=types.GenerateContentConfig(temperature=0.2),
+    generate_content_config=types.GenerateContentConfig(
+        temperature=0.2,
+        max_output_tokens=8192,
+    ),
 )
 
 writer_agent = Agent(
@@ -914,7 +1105,10 @@ writer_agent = Agent(
     input_schema=WriterInput,
     output_schema=WriterOutput,
     output_key="writer_output",
-    generate_content_config=types.GenerateContentConfig(temperature=0.2),
+    generate_content_config=types.GenerateContentConfig(
+        temperature=0.2,
+        max_output_tokens=8192,
+    ),
 )
 
 narrator_agent = Agent(
@@ -1038,7 +1232,7 @@ root_agent = Agent(
     generate_content_config=types.GenerateContentConfig(
         response_modalities=["TEXT"],
         temperature=0.2,
-        max_output_tokens=4096,
+        max_output_tokens=8192,
     ),
 )
 
