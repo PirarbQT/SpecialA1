@@ -1,190 +1,55 @@
-# ระบบ AI Agent อ่านข่าว แปลไทย และเชื่อม MCP (Search/Web/Notion) บน ADK Web
+# AI News Reader (ADK Web + Notion)
 
-โปรเจกต์นี้เป็น `Multi-Agent` บน `ADK Web` สำหรับ:
-- อ่านข่าวจาก URL
-- สรุปและแปลเป็นภาษาไทย
-- สร้างไฟล์เสียงภาษาไทย (MP3)
-- เชื่อม MCP เพิ่มเติมแบบ optional:
-- `Search MCP` ค้นหาแหล่งข่าวเพิ่ม
-- `Web MCP` ดึงหน้าเว็บ/ครอว์ลเว็บผ่าน MCP
-- `Notion MCP` ค้นหา/บันทึกข้อมูลใน Notion
+This project provides a Thai news workflow on ADK Web:
+- Read article from URL
+- Summarize and translate to Thai
+- Include full Thai body in output
+- Generate Thai MP3 narration (Artifacts)
+- Save latest summary to Notion via direct Notion API tool
 
-โมเดลหลัก (ค่าเริ่มต้น): `gemini-2.5-flash`
+## Integration scope
+- Search MCP / Web MCP were removed from runtime
+- Notion save is now a single dedicated tool (`save_latest_summary_to_notion`)
 
-## สถาปัตยกรรมตามภาพ (ฉบับที่ใช้งานจริงในโปรเจกต์นี้)
-
-1. `App Layer`
-- ผู้ใช้คุยกับเอเจนต์ผ่าน ADK Web
-
-2. `Agent Core Layer`
-- `news_pipeline_orchestrator` คุมลำดับงานทั้งหมด
-- มี 4 Sub-Agent:
-- `research_agent`
-- `analyzer_agent`
-- `writer_agent`
-- `narrator_agent`
-
-3. `Tools / MCP Layer`
-- `fetch_news_content` ดึงข่าวจาก URL (`r.jina.ai` + HTML fallback)
-- `create_thai_speech` สร้างไฟล์เสียง MP3 แล้วแนบเป็น Artifact
-- `update_workflow_stage` บันทึกสถานะงาน
-- `McpToolset (Search)` ใช้งานเมื่อเปิด `ENABLE_SEARCH_MCP=1`
-- `McpToolset (Web)` ใช้งานเมื่อเปิด `ENABLE_WEB_MCP=1`
-- `McpToolset (Notion)` ใช้งานเมื่อเปิด `ENABLE_NOTION_MCP=1`
-
-4. `Guardrails Layer`
-- ตรวจรูปแบบ URL
-- มี fallback เมื่อ model error หรือโควต้าเต็ม
-- ปิด MCP ที่ไม่พร้อมใช้งานแบบ fail-open (ไม่ทำให้ทั้งระบบล่ม)
-
-5. `Delivery Layer`
-- ส่งข้อความสรุป/แปลไทยในแชท
-- ส่งไฟล์เสียงในแท็บ Artifacts
-
-## Workflow ที่ระบบใช้
-
-- `Draft` -> Research Agent
-- `Reviewed` -> Analyzer Agent
-- `Approved` -> Writer Agent
-- `Audio Ready` -> Narrator Agent
-- `Published` -> ส่งผลลัพธ์กลับผู้ใช้
-
-## การติดตั้งและรัน
-
+## Run
 ```powershell
 $env:UV_LINK_MODE='copy'
 uv sync
 uv run adk web
 ```
 
-จากนั้นเปิด ADK Web แล้วเลือกแอป `myagent`
-
-## การตั้งค่า `.env`
-
-ไฟล์ `myagent/.env` ค่าหลักที่ต้องมี:
-
+## Environment (`myagent/.env`)
 ```env
 GOOGLE_GENAI_USE_VERTEXAI=0
 GOOGLE_API_KEY=YOUR_GOOGLE_API_KEY
-# Optional: เปลี่ยนโมเดลหลัก
-# GEMINI_MODEL=gemini-2.5-flash
-```
+GEMINI_MODEL=gemini-3.1-flash-lite-preview
+AUTO_FALLBACK_ON_503=1
+GEMINI_FALLBACK_MODEL=gemini-2.5-flash
+MAX_ARTICLE_CHARS=14000
 
-โหมดเสถียร (แนะนำตอนนี้): ปิด MCP ทั้งหมดก่อน
-
-```env
-ENABLE_SEARCH_MCP=0
-ENABLE_WEB_MCP=0
-ENABLE_NOTION_MCP=0
-```
-
-เปิด MCP เพิ่มเติมเมื่อพร้อมใช้งาน:
-
-```env
-# Search MCP
-ENABLE_SEARCH_MCP=1
-SEARCH_MCP_URL=https://your-search-mcp.example.com/mcp
-# SEARCH_MCP_BEARER_TOKEN=...
-# SEARCH_MCP_TOOL_FILTER=search,lookup
-
-# Web MCP
-ENABLE_WEB_MCP=1
-WEB_MCP_URL=https://your-web-mcp.example.com/mcp
-# WEB_MCP_BEARER_TOKEN=...
-# WEB_MCP_TOOL_FILTER=fetch,read
-
-# Notion MCP
 ENABLE_NOTION_MCP=1
-NOTION_MCP_URL=https://mcp.notion.com/mcp
-NOTION_MCP_BEARER_TOKEN=YOUR_NOTION_TOKEN
+NOTION_MCP_BEARER_TOKEN=YOUR_NOTION_INTEGRATION_TOKEN
+# or NOTION_API_KEY=YOUR_NOTION_INTEGRATION_TOKEN
 NOTION_VERSION=2022-06-28
-# NOTION_MCP_TOOL_FILTER=search,fetch,create-pages
 ```
 
-## วิธีใช้งาน MCP ใน ADK Web
+## Make Notion write work
+1. Create Notion integration token in Notion Developers.
+2. Put token into `NOTION_MCP_BEARER_TOKEN` (or `NOTION_API_KEY`).
+3. Share target page/database with that integration.
+4. Restart `uv run adk web`.
 
-1. ตั้งค่า `.env` ตาม MCP ที่ต้องการเปิด
-2. รันใหม่
+## Expected startup logs
+- `Notion Integration: enabled (init ok)` = ready
+- `missing NOTION_MCP_BEARER_TOKEN...` = token missing
+- `Token validation failed ...` = token invalid
 
-```powershell
-uv run adk web
+## Example prompts
+```text
+สรุปและแปลข่าวนี้เป็นภาษาไทย พร้อมทำเสียงอ่าน
+https://edition.cnn.com/...
 ```
-
-3. เปิด New Session แล้วทดสอบทีละเคส
-
-ตัวอย่างคำสั่ง Search MCP:
 
 ```text
-ช่วยค้นหาข่าวล่าสุดเรื่อง semiconductor supply chain จากหลายสำนัก แล้วสรุปเป็นภาษาไทย
+บันทึกสรุปล่าสุดลง Notion หน้านี้ https://www.notion.so/...
 ```
-
-ตัวอย่างคำสั่ง Web MCP:
-
-```text
-ช่วยดึงเนื้อหาหน้าเว็บนี้ผ่าน Web MCP แล้วสรุปประเด็นสำคัญเป็นภาษาไทย
-https://example.com/article
-```
-
-ตัวอย่างคำสั่ง Notion MCP:
-
-```text
-บันทึกสรุปข่าวล่าสุดลง Notion พร้อมลิงก์ต้นฉบับ
-```
-
-ตัวอย่างคำสั่งงานข่าวปกติ:
-
-```text
-สรุปและแปลข่าวนี้เป็นภาษาไทย แล้วสร้างเสียงอ่านให้ด้วย
-https://edition.cnn.com/2026/03/04/politics/trump-iran-war-fallout-endgame
-```
-
-## วิธีเช็กสถานะ MCP ตอนสตาร์ต
-
-ดู log ในเทอร์มินัล:
-- `Search MCP: enabled (init ok)` หรือ `init failed`
-- `Web MCP: enabled (init ok)` หรือ `init failed`
-- `Notion MCP: enabled (init ok)` หรือ `init failed`
-- `... disabled` หมายถึงยังปิดอยู่
-
-## ผลลัพธ์ที่ได้
-
-- ข้อความสรุป/แปลภาษาไทย
-- เนื้อหาข่าวฉบับเต็มภาษาไทย (แสดงในข้อความเดียวกัน)
-- ไฟล์เสียง `thai_news_tts_*.mp3` ใน `Artifacts`
-- ถ้าเปิด Search/Web MCP: สามารถค้นหาและดึงเว็บผ่าน MCP ได้
-- ถ้าเปิด Notion MCP: สามารถค้นหา/เขียนข้อมูลใน Notion ตามสิทธิ์ที่อนุญาต
-
-## Troubleshooting
-
-กรณีส่ง URL แล้วไม่ทำงาน:
-
-1. ตรวจว่า `GOOGLE_API_KEY` ถูกต้องใน `myagent/.env`
-2. ใช้ `GEMINI_MODEL=gemini-2.5-flash`
-3. รีสตาร์ต `uv run adk web`
-
-กรณี MCP ใช้ไม่ได้:
-
-1. ตรวจว่าเปิด `ENABLE_*_MCP=1` ถูกตัว
-2. ตรวจว่า `*_MCP_URL` ถูกต้องและเข้าถึงได้
-3. ถ้า endpoint ต้อง auth ให้ตั้ง `*_MCP_BEARER_TOKEN`
-4. ดู log ตอนสตาร์ตว่า `init failed` เพราะอะไร
-5. ถ้ายังไม่จำเป็น ให้กลับไปโหมดเสถียร (`ENABLE_*_MCP=0`) ก่อน
-
-ถ้าเจอ `ERROR: ASGI callable returned without completing response`:
-
-1. ปิด MCP ที่มีปัญหา (`ENABLE_*_MCP=0`)
-2. รีสตาร์ต `uv run adk web`
-3. ทดสอบ flow ข่าวให้ผ่านก่อน
-4. ค่อยเปิด MCP กลับทีละตัว
-
-## Session State ที่บันทึก
-
-- `workflow_stage`
-- `workflow_history`
-- `research_output`
-- `analysis_output`
-- `writer_output`
-- `narrator_output`
-# SpecialA1
-
-
