@@ -1,0 +1,14 @@
+.venv/
+.venv_old/
+.adk/
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+myagent/.adk/
+myagent/.env
+
+.DS_Store
+Thumbs.db
